@@ -39,7 +39,7 @@ object TopItemsProcessor {
     // Filter to limit to topX ranks
     val topXRankedDF = rankedDF.filter(col("item_rank") <= topX)
 
-    // Optionally, remove 'item_count' if you don't want it in the final output
+    // Remove 'item_count'
     val finalDF = topXRankedDF.drop("item_count")
 
     // Write the result to the output Parquet file

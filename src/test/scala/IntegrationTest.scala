@@ -33,13 +33,11 @@ class IntegrationTest extends AnyFunSuite with BeforeAndAfterAll {
     val outputDF = spark.read.parquet(outputPath)
 
     // Assertions about the output data
-    // For example, verify the count of items, schema, or specific data points
     assert(outputDF.count() > 0, "Output DataFrame should not be empty")
     assert(outputDF.columns.contains("geographical_location"), "Output should contain 'geographical_location' column")
     assert(outputDF.columns.contains("item_name"), "Output should contain 'item_name' column")
     assert(outputDF.columns.contains("item_rank"), "Output should contain 'item_rank' column")
 
-    // More detailed checks can be added based on expected results
   }
 
   override def afterAll(): Unit = {
