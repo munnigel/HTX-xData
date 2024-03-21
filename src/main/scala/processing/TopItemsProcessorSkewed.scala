@@ -1,8 +1,11 @@
-package htx.nigel.application.processing
+package htx.nigel.application
+package processing
 
-import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.expressions.Window
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.SaveMode
 
 object TopItemsProcessorSkewed {
   def findTopXItems(spark: SparkSession,
@@ -10,46 +13,52 @@ object TopItemsProcessorSkewed {
                     locationPath: String,
                     outputPath: String,
                     topX: Int): Unit = {
+    import spark.implicits._
 
-    // Enable AQE
-    spark.conf.set("spark.sql.adaptive.enabled", "true")
+    // Read the detection data Parquet file, convert to RDD, and introduce salting to the keys
+    val saltedDetectionsRDD = spark.read.parquet(detectionPath).rdd.flatMap(row => {
+      val locationOid = row.getAs[Long]("geographical_location_oid")
+      val itemName = row.getAs[String]("item_name")
+      // Generate multiple salted keys (0 to 4) for each record to distribute skew
+      (0 until 5).map(salt => ((locationOid.toString + "_" + salt), itemName))
+    })
 
-    // Read the detection data Parquet file
-    val detectionsDF = spark.read.parquet(detectionPath)
+    // Read the geographical locations Parquet file and convert to a Map
+    val locationsMap = spark.read.parquet(locationPath).rdd.flatMap(row => {
+      val locationOid = row.getAs[Long]("geographical_location_oid").toString
+      val locationName = row.getAs[String]("geographical_location")
+      // Replicate location entries for each salt value (0 to 4) used in detections
+      (0 until 5).map(salt => ((locationOid + "_" + salt), locationName))
+    }).collectAsMap()
 
-    // Add a salt to the 'geographical_location_oid' to address skew
-    val saltedDetectionsDF = detectionsDF
-      .withColumn("salt", (rand() * 4).cast("int"))
-      .withColumn("salted_oid", concat(col("geographical_location_oid"), lit("_"), col("salt")))
+    // Distributing the Map of locationsRDD map to Spark Nodes
+    val broadcastLocations = spark.sparkContext.broadcast(locationsMap)
 
-    // Read the geographical locations Parquet file
-    val locationsDF = spark.read.parquet(locationPath)
+    // Perform a join with the broadcasted locations, without using .join. .get() is used to find the matching locationID.
+    val joinedRDD = saltedDetectionsRDD.mapPartitions(iter => {
+      val locMap = broadcastLocations.value
+      iter.flatMap {
+        case (saltedLocId, itemName) =>
+          locMap.get(saltedLocId).map(location => (((location, itemName), 1))) // finds the same locId, maps each location and item name to a count of 1
+      }
+    }).reduceByKey(_ + _) // sums count for each (location, itemName) pair of key, incrementing by 1
 
-    // Explode locationsDF to match the salt range in saltedDetectionsDF
-    val explodedLocationsDF = locationsDF
-      .withColumn("salt", explode(array((0 until 4).map(lit): _*)))
-      .withColumn("salted_oid", concat(col("geographical_location_oid"), lit("_"), col("salt")))
-      .drop("salt")
+    // Transformations to rank items within each location
+    val rankedItemsRDD = joinedRDD.map {
+      case ((location, itemName), count) => (location, (itemName, count)) // groups data based on location
+    }.groupByKey().flatMap {
+      case (location, items) =>
+        items.toList.sortBy(-_._2).zipWithIndex.map {
+          case ((itemName, count), index) => (location, itemName, index + 1) // sort items by count in descending order
+        }.take(topX) // take the specified topX
+    }
 
-    // Join using the salted_oid
-    val joinedDF = saltedDetectionsDF
-      .join(broadcast(explodedLocationsDF), "salted_oid")
-      .drop("salted_oid", "salt")
+    // Convert RDD to DataFrame for saving
+    val finalDF = spark.createDataFrame(rankedItemsRDD.map(Row.fromTuple), new StructType()
+      .add("geographical_location", StringType, nullable = true)
+      .add("item_name", StringType, nullable = true)
+      .add("item_rank", IntegerType, nullable = true))
 
-    // Now perform the aggregation on joinedDF to get counts by item and location
-    val aggregatedDF = joinedDF
-      .groupBy("geographical_location", "item_name")
-      .agg(count("item_name").alias("item_count"))
-
-    // Apply the window specification to calculate ranks within each geographical location
-    val windowSpec = Window.partitionBy("geographical_location").orderBy(col("item_count").desc)
-
-    val rankedDF = aggregatedDF
-      .withColumn("item_rank", dense_rank().over(windowSpec))
-      .where(col("item_rank") <= topX)
-      .orderBy("geographical_location", "item_rank", "item_name")
-
-    // Write the result to the output Parquet file
-    rankedDF.write.mode(SaveMode.Overwrite).parquet(outputPath)
+    finalDF.write.mode(SaveMode.Overwrite).parquet(outputPath)
   }
 }

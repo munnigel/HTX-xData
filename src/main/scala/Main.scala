@@ -16,7 +16,7 @@ object Main {
     val detectionPath = "src/main/resources/sampleA.parquet" // flexibility to change to any input path
     val locationPath = "src/main/resources/sampleB.parquet" // flexibility to change to any input path
     val outputPath = "src/main/resources/output_top_items.parquet" // flexibility to change to any output path
-    val topX = 3 // flexibility to change any top number
+    val topX = 5 // flexibility to change any top number
 
     // Choose either the normal processor, or processor for Skewed data
     TopItemsProcessor.findTopXItems(spark, detectionPath, locationPath, outputPath, topX)
