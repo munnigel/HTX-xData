@@ -10,7 +10,7 @@ object TopItemsProcessor {
                     locationPath: String,
                     outputPath: String,
                     topX: Int): Unit = {
-    // Converting detections parquet into an RDD, and casting column data types
+    // Converting detections parquet into an RDD, and prepare map for column data types
     val detectionsRDD = spark.read.parquet(detectionPath).rdd.map(row =>
       (row.getAs[Long]("geographical_location_oid"), row.getAs[String]("item_name"))
     )
@@ -59,7 +59,7 @@ object TopItemsProcessor {
     // Convert RDD[Row] to DataFrame
     val finalDF = spark.createDataFrame(rowRDD, schema)
 
-    // Write the DataFrame as a Parquet file
+    // Write the DataFrame as a Parquet file, and executes app the map/flatmap transformation steps above.
     finalDF.write.mode(SaveMode.Overwrite).parquet(outputPath)
   }
 }
